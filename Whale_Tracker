@@ -1,0 +1,117 @@
+import requests
+import time
+import json
+from datetime import datetime
+
+# === CONFIGURATION ===
+API_URL = "https://data-api.polymarket.com/trades"
+POLL_INTERVAL = 15  # seconds between fetches
+TRADE_THRESHOLD_USD = 20000  # minimum trade value to alert
+MAX_SEEN = 100  # max trades stored in memory
+
+# Discord webhook (replace with your webhook)
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1432845517699678258/qtUSz5IpPFXoudcoj0mcumsECmbOgIx8VaZFaPziOT9TSXCLxx8m-2n9sbwRAfTAVWh_"
+
+# Keywords to include (finance/business/economic topics)
+BUSINESS_KEYWORDS = [
+    "stock", "company", "earnings", "ipo", "revenue", "profit", "quarter",
+    "tesla", "apple", "amazon", "google", "meta", "nvidia",
+    "market", "inflation", "fed", "interest", "gdp", "recession",
+    "employment", "unemployment", "oil", "gas", "gold", "bitcoin", "crypto",
+    "currency", "exchange", "bond", "treasury", "rate", "economic", "election"
+]
+
+# Store seen trades
+seen_trades = set()
+
+# === HELPER FUNCTIONS ===
+def fetch_recent_trades(limit=200):
+    """Fetch recent Polymarket trades via public API."""
+    try:
+        r = requests.get(API_URL, params={"limit": limit})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch trades: {e}")
+        return []
+
+def trade_value_usd(trade):
+    try:
+        return float(trade["size"]) * float(trade["price"])
+    except Exception:
+        return 0.0
+
+def is_business_market(title):
+    """Return True if the market title is business/finance-related."""
+    if not title:
+        return False
+    title_lower = title.lower()
+    return any(keyword in title_lower for keyword in BUSINESS_KEYWORDS)
+
+def format_trade_message(trade, value):
+    """Format the Discord message for a large trade."""
+    ts = datetime.utcfromtimestamp(trade["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+    market_link = f"https://polymarket.com/market/{trade.get('marketSlug', '')}"
+    wallet = trade.get("proxyWallet", "Unknown")
+
+    embed = {
+        "username": "Polymarket Whale Tracker",
+        "embeds": [
+            {
+                "title": " Large Polymarket Business Trade Detected!",
+                "color": 0x4B0082,  # Discord purple
+                "fields": [
+                    {"name": " Value", "value": f"${value:,.2f}", "inline": True},
+                    {"name": " Market", "value": trade.get("title", "Unknown"), "inline": False},
+                    {"name": " Outcome", "value": trade.get("outcome", "N/A"), "inline": True},
+                    {"name": " Wallet", "value": f"`{wallet}`", "inline": False},
+                    {"name": " Time (UTC)", "value": ts, "inline": True},
+                ],
+                "url": market_link,
+                "footer": {"text": "Polymarket Whale Tracker (Business Events)"},
+            }
+        ],
+    }
+    return embed
+
+def send_discord_alert(payload):
+    """Send an alert to Discord."""
+    try:
+        r = requests.post(DISCORD_WEBHOOK_URL, json=payload)
+        if r.status_code != 204:
+            print(f"[WARN] Discord webhook response: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"[ERROR] Failed to send Discord alert: {e}")
+
+# === MAIN LOOP ===
+print(" Starting Polymarket Whale Tracker (Business Events Only)...")
+
+while True:
+    trades = fetch_recent_trades()
+
+    for t in trades:
+        tx = t.get("transactionHash")
+        if not tx or tx in seen_trades:
+            continue
+
+        seen_trades.add(tx)
+        if len(seen_trades) > MAX_SEEN:
+            seen_trades.clear()
+
+        value = trade_value_usd(t)
+        title = t.get("title", "")
+
+        # Only proceed if it's a business-related market
+        if not is_business_market(title):
+            continue
+
+        if value >= TRADE_THRESHOLD_USD:
+            payload = format_trade_message(t, value)
+            print(f" Business Trade Alert: ${value:,.2f} — {title}")
+            send_discord_alert(payload)
+
+            with open("whale_trades_business.log", "a") as f:
+                f.write(json.dumps(t) + "\n")
+
+    print(f" Sleeping {POLL_INTERVAL}s...\n")
+    time.sleep(POLL_INTERVAL)
